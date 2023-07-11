@@ -1,0 +1,34 @@
+[package]
+name = "mock-agones"
+version = "0.1.0"
+edition = "2021"
+authors = ["Kuba Jaroszewski <jakub.jaroszewski@gmail.com>"]
+description = "Mock Agones SDK server for testing Agones integration"
+repository = "https://github.com/pierd/mock-agones"
+keywords = [
+    "agones",
+    "testing",
+]
+categories = ["game-development"]
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+flume = { version = "0.10", features = ["async"] }
+futures = "0.3"
+futures-core = "0.3"
+parking_lot = "0.12"
+prost = "0.11"
+tokio = "1.0"
+tonic = "0.9"
+
+[dev-dependencies]
+agones = { git = "https://github.com/googleforgames/agones", rev = "refs/tags/v1.33.0" }
+claims = "0.7"
+fake = "2.6"
+
+[build-dependencies]
+tonic-build = "0.9"
