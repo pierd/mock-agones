@@ -1,6 +1,6 @@
 [package]
 name = "mock-agones"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Kuba Jaroszewski <jakub.jaroszewski@gmail.com>"]
 description = "Mock Agones SDK server for testing Agones integration"
