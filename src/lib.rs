@@ -8,6 +8,7 @@ use std::{
 use parking_lot::RwLock;
 use sdk::{Duration, Empty, GameServer, KeyValue};
 use tokio::net::TcpListener;
+use tokio_stream::StreamExt;
 use tonic::{async_trait, transport::server::TcpIncoming};
 
 pub mod sdk {
@@ -105,8 +106,7 @@ pub struct MockAgonesServer {
     pub port: u16,
     recorded_calls: Arc<RwLock<Vec<InternalSdkCall>>>,
     stored_game_server: Arc<RwLock<GameServer>>,
-    game_server_sender: flume::Sender<Result<GameServer, tonic::Status>>,
-    game_server_receiver: flume::Receiver<Result<GameServer, tonic::Status>>,
+    game_server_sender: tokio::sync::broadcast::Sender<Result<GameServer, tonic::Status>>,
     calls_to_fail: Arc<RwLock<HashMap<FailableSdkCall, tonic::Status>>>,
 }
 
@@ -120,14 +120,13 @@ impl MockAgonesServer {
         let listener = TcpListener::bind(localhost_with_any_port).await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        let (game_server_sender, game_server_receiver) = flume::unbounded();
+        let (game_server_sender, _) = tokio::sync::broadcast::channel(1);
 
         let server = Self {
             port,
             recorded_calls: Default::default(),
             stored_game_server: Default::default(),
             game_server_sender,
-            game_server_receiver,
             calls_to_fail: Default::default(),
         };
 
@@ -154,11 +153,11 @@ impl MockAgonesServer {
 
     pub fn set_game_server(&self, gs: GameServer) {
         self.stored_game_server.write().clone_from(&gs);
-        self.game_server_sender.send(Ok(gs)).unwrap();
+        let _ = self.game_server_sender.send(Ok(gs));
     }
 
     pub fn stream_watch_game_server_error(&self, err: tonic::Status) {
-        self.game_server_sender.send(Err(err)).unwrap();
+        let _ = self.game_server_sender.send(Err(err));
     }
 
     pub fn fail(&self, sdk_call: FailableSdkCall, err: tonic::Status) {
@@ -255,7 +254,11 @@ impl sdk::sdk_server::Sdk for MockAgonesServer {
         _request: tonic::Request<Empty>,
     ) -> std::result::Result<tonic::Response<Self::WatchGameServerStream>, tonic::Status> {
         self.record_and_fail_if_needed(InternalSdkCall::WatchGameServer)?;
-        let stream = self.game_server_receiver.clone().into_stream();
+        let rx = self.game_server_sender.subscribe();
+        let stream = tokio_stream::wrappers::BroadcastStream::new(rx).map(|res| match res {
+            Ok(x) => x,
+            Err(e) => Err(tonic::Status::internal(e.to_string())),
+        });
         Ok(tonic::Response::new(Box::pin(stream)))
     }
 
@@ -292,6 +295,7 @@ mod tests {
     use std::time::Duration;
 
     use fake::{Fake, StringFaker};
+    use futures_core::Future;
 
     use crate::sdk::game_server;
 
@@ -299,6 +303,10 @@ mod tests {
 
     fn fake_string() -> String {
         StringFaker::with((b'a'..=b'z').collect(), 4..=6).fake()
+    }
+
+    fn timeout<F: Future>(future: F) -> tokio::time::Timeout<F> {
+        tokio::time::timeout(Duration::from_millis(100), future)
     }
 
     #[tokio::test]
@@ -469,18 +477,55 @@ mod tests {
 
         // Act
         server.set_game_server(game_server.clone());
-        let retrieved_game_server =
-            tokio::time::timeout(std::time::Duration::from_millis(100), stream.message())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+        let retrieved_game_server = timeout(stream.message()).await.unwrap().unwrap().unwrap();
 
         // Assert
         assert_eq!(
             retrieved_game_server.object_meta.unwrap().name,
             game_server.object_meta.unwrap().name
         );
+    }
+
+    #[tokio::test]
+    async fn call_to_watch_game_server_works_for_multiple_watchers() {
+        // Arrange
+        let server = MockAgonesServer::new().await;
+        let mut sdk = agones::Sdk::new(server.port.into(), None).await.unwrap();
+        let mut sdk2 = agones::Sdk::new(server.port.into(), None).await.unwrap();
+        let game_server = GameServer {
+            object_meta: Some(game_server::ObjectMeta {
+                name: fake_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_ne!(game_server, Default::default()); // sanity check
+        let mut stream = sdk.watch_gameserver().await.unwrap();
+        let mut stream2 = sdk2.watch_gameserver().await.unwrap();
+
+        // Act
+        server.set_game_server(game_server.clone());
+        let (retrieved_game_server, retrieved_game_server2) =
+            tokio::join!(timeout(stream.message()), timeout(stream2.message()),);
+
+        // Assert
+        let original_name = game_server.object_meta.unwrap().name;
+        let retrieved_name = retrieved_game_server
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .object_meta
+            .unwrap()
+            .name;
+        let retrieved_name2 = retrieved_game_server2
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .object_meta
+            .unwrap()
+            .name;
+        assert_eq!(original_name, retrieved_name);
+        assert_eq!(original_name, retrieved_name2);
     }
 
     #[tokio::test]
@@ -492,9 +537,7 @@ mod tests {
 
         // Act
         server.stream_watch_game_server_error(tonic::Status::internal(fake_string()));
-        let result = tokio::time::timeout(std::time::Duration::from_millis(100), stream.message())
-            .await
-            .unwrap();
+        let result = timeout(stream.message()).await.unwrap();
 
         // Assert
         claims::assert_err!(result);

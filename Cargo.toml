@@ -17,12 +17,12 @@ license = "MIT OR Apache-2.0"
 path = "src/lib.rs"
 
 [dependencies]
-flume = { version = "0.10", features = ["async"] }
 futures = "0.3"
 futures-core = "0.3"
 parking_lot = "0.12"
 prost = "0.11"
 tokio = "1.0"
+tokio-stream = { version = "0.1", features = ["sync"] }
 tonic = "0.9"
 
 [dev-dependencies]
